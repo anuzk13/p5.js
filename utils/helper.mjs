@@ -53,6 +53,10 @@ function generateP5TypeDefinitions(organizedData) {
         }
         if (constData.kind === 'constant') {
           output += `  readonly ${constData.name.toUpperCase()}: ${constData.type};\n\n`;
+        } else if (constData.kind === 'typedef') {
+          // For typedef constants, create both instance and static versions
+          output += `  readonly ${constData.name}: ${constData.type};\n`;
+          output += `  static readonly ${constData.name}: ${constData.type};\n\n`;
         } else {
           output += `  static ${constData.name}: ${constData.type};\n\n`;
         }
@@ -115,6 +119,11 @@ function generateGlobalTypeDefinitions(organizedData) {
           .map(param => generateParamDeclaration(param))
           .join(', ');
         output += `  function ${item.name}(${params}): ${item.returnType};\n\n`;
+      } else if (item.kind === 'property') {
+        if (item.description) {
+          output += `  /**\n${formatJSDocComment(item.description, 2)}\n   */\n`;
+        }
+        output += `  const ${item.name}: ${item.returnType};\n\n`;
       }
     });
 
@@ -124,6 +133,11 @@ function generateGlobalTypeDefinitions(organizedData) {
           output += `  /**\n${formatJSDocComment(constData.description, 2)}\n   */\n`;
        }
         output += `  const ${constData.name.toUpperCase()}: p5.${constData.name.toUpperCase()};\n\n`;
+      } else if (constData.kind === 'typedef') {
+        if (constData.description) {
+          output += `  /**\n${formatJSDocComment(constData.description, 2)}\n   */\n`;
+        }
+        output += `  const ${constData.name}: ${constData.type};\n\n`;
       }
     });
 
@@ -132,6 +146,8 @@ function generateGlobalTypeDefinitions(organizedData) {
     instanceItems.forEach(item => {
       if (item.kind === 'function') {
         output += `    ${item.name}: typeof ${item.name};\n`;
+      } else if (item.kind === 'property') {
+        output += `    readonly ${item.name}: typeof ${item.name};\n`;
       }
     });
 
@@ -141,6 +157,11 @@ function generateGlobalTypeDefinitions(organizedData) {
           output += `    /**\n     * ${constData.description}\n     */\n`;
         }
         output += `    readonly ${constData.name.toUpperCase()}: typeof ${constData.name.toUpperCase()};\n`;
+      } else if (constData.kind === 'typedef') {
+        if (constData.description) {
+          output += `    /**\n     * ${constData.description}\n     */\n`;
+        }
+        output += `    readonly ${constData.name}: typeof ${constData.name};\n`;
       }
     });
 
@@ -276,9 +297,32 @@ function generateDeclarationFile(items, organizedData) {
 
     allData.forEach(entry => {
       const { module, submodule, forEntry } = getModuleInfo(entry);
-      const className = normalizeClassName(forEntry || entry.memberof || 'p5');
+      
+      // Handle special case where memberof is 'fn' - this should be treated as p5
+      let classTarget = forEntry || entry.memberof || 'p5';
+      if (classTarget === 'fn') {
+        classTarget = 'p5';
+      }
+      const className = normalizeClassName(classTarget);
 
-      switch(entry.kind) {
+      // Check tags to determine the actual kind for entries with null kind
+      const propertyTag = entry.tags?.find(tag => tag.title === 'property');
+      const typedefTag = entry.tags?.find(tag => tag.title === 'typedef');
+      const constantTag = entry.tags?.find(tag => tag.title === 'constant');
+      
+      // Determine effective kind
+      let effectiveKind = entry.kind;
+      if (!effectiveKind) {
+        if (propertyTag) {
+          effectiveKind = 'property';
+        } else if (typedefTag) {
+          effectiveKind = 'typedef';
+        } else if (constantTag) {
+          effectiveKind = 'constant';
+        }
+      }
+
+      switch(effectiveKind) {
         case 'class':
           organized.classes[className] = {
             name: entry.name,
@@ -301,9 +345,19 @@ function generateDeclarationFile(items, organizedData) {
               description: extractDescription(overload.description)
             }));
 
+            // For properties with property tags, get the type from the tag
+            let returnType = 'void';
+            if (effectiveKind === 'property' && propertyTag?.type) {
+              returnType = generateTypeFromTag(propertyTag);
+            } else if (entry.tags?.find(tag => tag.title === "chainable")) {
+              returnType = "this";
+            } else if (entry.returns?.[0]) {
+              returnType = generateTypeFromTag(entry.returns[0]);
+            }
+
             organized.classitems.push({
               name: entry.name,
-              kind: entry.kind,
+              kind: effectiveKind,
               description: extractDescription(entry.description),
               params: (entry.params || []).map(param => ({
                 name: param.name,
@@ -311,24 +365,31 @@ function generateDeclarationFile(items, organizedData) {
                 optional: param.type?.type === 'OptionalType',
                 rest: param.type?.type === 'RestType'
               })),
-              returnType: entry.tags?.find(tag => tag.title === "chainable")
-                ? "this"
-                : entry.returns?.[0]
-                  ? generateTypeFromTag(entry.returns[0])
-                  : 'void',
+              returnType,
               module,
               submodule,
               class: className,
-              isStatic: entry.path?.[0]?.scope === 'static',
+              // For p5 instance properties documented as static, treat them as instance properties
+              isStatic: className === 'p5' && effectiveKind === 'property' ? false : entry.path?.[0]?.scope === 'static',
               overloads
             }); break;
           case 'constant':
           case 'typedef':
+            // For typedef entries, get the type from the typedef tag if available
+            let constType = 'any';
+            if (effectiveKind === 'typedef' && typedefTag?.type) {
+              constType = generateTypeFromTag(typedefTag);
+            } else if (effectiveKind === 'constant') {
+              constType = `P5.${entry.name.toUpperCase()}`;
+            } else if (entry.type) {
+              constType = generateTypeFromTag(entry);
+            }
+
             organized.consts[entry.name] = {
               name: entry.name,
-              kind: entry.kind,
+              kind: effectiveKind,
               description: extractDescription(entry.description),
-              type: entry.kind === 'constant' ? `P5.${entry.name.toUpperCase()}` : (entry.type ? generateTypeFromTag(entry) : 'any'),
+              type: constType,
               module,
               submodule,
               class: forEntry || 'p5'
