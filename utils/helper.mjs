@@ -310,6 +310,25 @@ function generateDeclarationFile(items, organizedData) {
       const typedefTag = entry.tags?.find(tag => tag.title === 'typedef');
       const constantTag = entry.tags?.find(tag => tag.title === 'constant');
       
+      // Handle Object.defineProperty entries that contain properties in their properties array
+      if (entry.name === 'defineProperty' && entry.properties?.length > 0) {
+        entry.properties.forEach(prop => {
+          organized.classitems.push({
+            name: prop.name,
+            kind: 'property',
+            description: extractDescription(entry.description),
+            params: [],
+            returnType: generateTypeFromTag(prop),
+            module,
+            submodule,
+            class: className,
+            isStatic: false,
+            overloads: undefined
+          });
+        });
+        return; // Skip further processing of this entry
+      }
+      
       // Determine effective kind
       let effectiveKind = entry.kind;
       if (!effectiveKind) {
