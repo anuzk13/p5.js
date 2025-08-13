@@ -17,17 +17,62 @@ export function normalizeClassName(className) {
   return className.startsWith('p5.') ? className : `p5.${className}`;
 }
 
+// Helper function to check if a name is a reserved keyword in TypeScript
+export function isReservedKeyword(name) {
+  const reservedKeywords = [
+    'abstract', 'any', 'as', 'asserts', 'bigint', 'boolean', 'break',
+    'case', 'catch', 'class', 'const', 'continue', 'debugger', 'declare',
+    'default', 'delete', 'do', 'else', 'enum', 'export', 'extends',
+    'false', 'finally', 'for', 'from', 'function', 'get', 'global',
+    'if', 'implements', 'import', 'in', 'infer', 'instanceof', 'interface',
+    'intrinsic', 'is', 'keyof', 'let', 'module', 'namespace', 'never',
+    'new', 'null', 'number', 'object', 'of', 'package', 'private',
+    'protected', 'public', 'readonly', 'require', 'return', 'set',
+    'static', 'string', 'super', 'switch', 'symbol', 'this', 'throw',
+    'true', 'try', 'type', 'typeof', 'undefined', 'unique', 'unknown',
+    'var', 'void', 'while', 'with', 'yield'
+  ];
+  return reservedKeywords.includes(name);
+}
+
+// Helper function to check if a name is a valid TypeScript identifier
+export function isValidIdentifier(name) {
+  if (!name || typeof name !== 'string') return false;
+  // Check if it's a valid identifier (starts with letter/underscore/dollar, contains only alphanumeric/underscore/dollar)
+  return /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(name);
+}
+
+// Helper function to sanitize function names for TypeScript
+export function sanitizeFunctionName(name) {
+  if (!name || typeof name !== 'string') return 'unknownFunction';
+  
+  // Handle names that start with numbers
+  if (/^\d/.test(name)) {
+    name = '_' + name;
+  }
+  
+  // Replace invalid characters with underscores
+  name = name.replace(/[^a-zA-Z0-9_$]/g, '_');
+  
+  // If it's a reserved keyword, prefix with underscore
+  if (isReservedKeyword(name)) {
+    name = '_' + name;
+  }
+  
+  return name;
+}
+
 export function generateTypeDefinitions(data) {
 
   const organized = organizeData(data);
 
   return {
-    p5Types: generateP5TypeDefinitions(organized),
+    p5Types: generateP5TypeDefinitions(organized, data),
     globalTypes: generateGlobalTypeDefinitions(organized),
     fileTypes: generateFileTypeDefinitions(organized, data)
   };
 }
-function generateP5TypeDefinitions(organizedData) {
+function generateP5TypeDefinitions(organizedData, data) {
     let output = '// This file is auto-generated from JSDoc documentation\n\n';
 
     output += `declare class p5 {\n`;
@@ -76,11 +121,30 @@ function generateP5TypeDefinitions(organizedData) {
       }
     });
 
+    // Get classes that have dedicated files 
+    const classesWithDedicatedFiles = getClassesWithDedicatedFiles(organizedData, data);
+    
     Object.values(organizedData.classes).forEach(classDoc => {
-      if (classDoc.name !== 'p5') {
+      if (classDoc.name !== 'p5' && 
+          !classDoc.name.includes('ErrorStackParser') &&
+          !classesWithDedicatedFiles.has(classDoc.name) &&
+          !classesWithDedicatedFiles.has(`p5.${classDoc.name}`) &&
+          !classesWithDedicatedFiles.has(classDoc.name.replace('p5.', ''))) {
         output += generateClassDeclaration(classDoc, organizedData);
       }
     });
+
+    // Add type aliases for classes with dedicated files so they're accessible via p5.ClassName
+    const addedClasses = new Set();
+    classesWithDedicatedFiles.forEach(className => {
+      const cleanClassName = className.replace('p5.', '');
+      if (!addedClasses.has(cleanClassName)) {
+        // Use type alias to reference the actual class from the module augmentation
+        output += `  type ${cleanClassName} = import('p5').${cleanClassName};\n`;
+        addedClasses.add(cleanClassName);
+      }
+    });
+
     output += `}\n\n`;
 
     output += `export default p5;\n`;
@@ -183,6 +247,26 @@ function generateFileTypeDefinitions(organizedData, data) {
 
     return fileDefinitions;
   }
+
+  // Helper function to get classes that have dedicated files
+  function getClassesWithDedicatedFiles(organizedData, data) {
+    const fileGroups = groupByFile(getAllEntries(data));
+    const classesWithFiles = new Set();
+    
+    fileGroups.forEach((items, filePath) => {
+      const classDoc = items.find(item => item.kind === 'class');
+      if (classDoc) {
+        // Add both the original class name and the normalized version
+        classesWithFiles.add(classDoc.name);
+        classesWithFiles.add(normalizeClassName(classDoc.name));
+        // Also add without p5. prefix for matching
+        const withoutPrefix = classDoc.name.replace('p5.', '');
+        classesWithFiles.add(withoutPrefix);
+      }
+    });
+    
+    return classesWithFiles;
+  }
   const organized = {
     modules: {},
     classes: {},
@@ -193,16 +277,23 @@ function generateFileTypeDefinitions(organizedData, data) {
 function generateDeclarationFile(items, organizedData) {
     let output = '// This file is auto-generated from JSDoc documentation\n\n';
     const imports = new Set([`import p5 from 'p5';`]);
+    
+    // Get the class being defined in this file to avoid self-imports
+    const classDoc = items.find(item => item.kind === 'class');
+    const currentClassName = classDoc ? normalizeClassName(classDoc.name).replace('p5.', '') : '';
+    
     const hasColorDependency = items.some(item => {
       const typeName = item.type?.name;
       const desc = extractDescription(item.description);
-      return typeName === 'Color' || (typeof desc === 'string' && desc.includes('Color'));
+      return (typeName === 'Color' || (typeof desc === 'string' && desc.includes('Color'))) 
+             && currentClassName !== 'Color'; // Don't import Color in Color's own file
     });
 
     const hasVectorDependency = items.some(item => {
       const typeName = item.type?.name;
       const desc = extractDescription(item.description);
-      return typeName === 'Vector' || (typeof desc === 'string' && desc.includes('Vector'));
+      return (typeName === 'Vector' || (typeof desc === 'string' && desc.includes('Vector'))) 
+             && currentClassName !== 'Vector'; // Don't import Vector in Vector's own file
     });
 
     const hasConstantsDependency = items.some(item =>
@@ -220,9 +311,7 @@ function generateDeclarationFile(items, organizedData) {
     }
 
     output += Array.from(imports).join('\n') + '\n\n';
-    output += `declare module 'p5' {\n`;
-
-    const classDoc = items.find(item => item.kind === 'class');
+    
     if (classDoc) {
       const fullClassName = normalizeClassName(classDoc.name);
       const classDocName = fullClassName.replace('p5.', '');
@@ -232,6 +321,8 @@ function generateDeclarationFile(items, organizedData) {
       }
       const extendsClause = parentClass ? ` extends ${parentClass}` : '';
 
+      // First, add the class to the p5 namespace for p5.ClassName access
+      output += `declare namespace p5 {\n`;
       output += `  class ${classDocName}${extendsClause} {\n`;
 
       if (classDoc.params?.length > 0) {
@@ -255,11 +346,39 @@ function generateDeclarationFile(items, organizedData) {
       instanceItems.forEach(item => {
         output += generateMethodDeclarations(item, false);
       });
-      output += '  }\n\n';
+      output += '  }\n'; // Close the class
+      output += '}\n\n'; // Close the namespace
+
+      // Also add the module augmentation for extending the p5 module itself
+      output += `declare module 'p5' {\n`;
+      output += `  class ${classDocName}${extendsClause} {\n`;
+
+      if (classDoc.params?.length > 0) {
+        output += '    constructor(';
+        output += classDoc.params
+          .map(param => generateParamDeclaration(param))
+          .join(', ');
+        output += ');\n\n';
+      }
+
+      staticItems.forEach(item => {
+        output += generateMethodDeclarations(item, true);
+      });
+      instanceItems.forEach(item => {
+        output += generateMethodDeclarations(item, false);
+      });
+      output += '  }\n'; // Close the class
+      output += '}\n\n'; // Close the module
     }
 
-    items.forEach(item => {
-      if (item.kind !== 'class' && (!item.memberof || item.memberof !== classDoc?.name)) {
+    // Handle non-class items (functions, constants, etc.)
+    const nonClassItems = items.filter(item => 
+      item.kind !== 'class' && (!item.memberof || item.memberof !== classDoc?.name)
+    );
+
+    if (nonClassItems.length > 0) {
+      output += `declare module 'p5' {\n`;
+      nonClassItems.forEach(item => {
         switch (item.kind) {
           case 'function':
             output += generateFunctionDeclaration(item);
@@ -279,10 +398,9 @@ function generateDeclarationFile(items, organizedData) {
             }
             break;
         }
-      }
-    });
-
-    output += '}\n\n';
+      });
+      output += '}\n\n';
+    }
 
     return output;
   }
@@ -343,7 +461,9 @@ function generateDeclarationFile(items, organizedData) {
 
       switch(effectiveKind) {
         case 'class':
-          organized.classes[className] = {
+          // For classes, use the actual entry name as the key, not the normalized className
+          const classKey = entry.name.startsWith('p5.') ? entry.name : normalizeClassName(entry.name);
+          organized.classes[classKey] = {
             name: entry.name,
             description: extractDescription(entry.description),
             params: (entry.params || []).map(param => ({
@@ -522,7 +642,13 @@ export function generateTypeFromTag(param) {
       prefix = '...';
     }
 
-    return `${prefix}${param.name}${isOptional ? '?' : ''}: ${type}`;
+    // Escape reserved keywords and invalid identifiers
+    let paramName = param.name;
+    if (isReservedKeyword(paramName) || !isValidIdentifier(paramName)) {
+      paramName = `_${paramName}`;
+    }
+
+    return `${prefix}${paramName}${isOptional ? '?' : ''}: ${type}`;
   }
 
   export function generateFunctionDeclaration(funcDoc) {
@@ -557,7 +683,14 @@ export function generateTypeFromTag(param) {
       ? generateTypeFromTag(funcDoc.returns[0])
       : 'void';
 
-    output += `function ${funcDoc.name}(${params}): ${returnType};\n\n`;
+    const sanitizedName = sanitizeFunctionName(funcDoc.name);
+    
+    // Special handling for p5 constructor and malformed function declarations
+    if (funcDoc.name === 'p5' || (returnType && returnType.includes('typeof'))) {
+      return ''; // Skip malformed declarations
+    }
+    
+    output += `function ${sanitizedName}(${params}): ${returnType};\n\n`;
     return output;
   }
 
@@ -587,6 +720,7 @@ export function generateTypeFromTag(param) {
       const staticPrefix = isStatic ? 'static ' : '';
 
       if (item.overloads?.length > 0) {
+        const sanitizedMethodName = sanitizeFunctionName(item.name);
         item.overloads.forEach(overload => {
           const params = (overload.params || [])
             .map(param => generateParamDeclaration(param))
@@ -594,17 +728,19 @@ export function generateTypeFromTag(param) {
           const returnType = overload.returns?.[0]?.type
             ? generateTypeFromTag(overload.returns[0])
             : 'void';
-          output += `  ${staticPrefix}${item.name}(${params}): ${returnType};\n`;
+          output += `  ${staticPrefix}${sanitizedMethodName}(${params}): ${returnType};\n`;
         });
       }
 
       const params = (item.params || [])
         .map(param => generateParamDeclaration(param))
         .join(', ');
-      output += `  ${staticPrefix}${item.name}(${params}): ${item.returnType};\n\n`;
+      const sanitizedMethodName = sanitizeFunctionName(item.name);
+      output += `  ${staticPrefix}${sanitizedMethodName}(${params}): ${item.returnType};\n\n`;
     } else {
       const staticPrefix = isStatic ? 'static ' : '';
-      output += `  ${staticPrefix}${item.name}: ${item.returnType};\n\n`;
+      const sanitizedPropertyName = sanitizeFunctionName(item.name);
+      output += `  ${staticPrefix}${sanitizedPropertyName}: ${item.returnType};\n\n`;
     }
 
     return output;

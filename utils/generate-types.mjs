@@ -2,7 +2,8 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import {
-  generateTypeDefinitions
+  generateTypeDefinitions,
+  sanitizeFunctionName
 } from "./helper.mjs";
 
 // Fix for __dirname equivalent in ES modules
@@ -53,7 +54,7 @@ export function generateAllDeclarationFiles() {
       `${parsedPath.name}.d.ts`
     );
 
-    const exportName = parsedPath.name.replace('.', '_');
+    const exportName = sanitizeFunctionName(parsedPath.name.replace('.', '_'));
     const contentWithExport = content + `export default function ${exportName}(p5: any, fn: any): void;\n`;
 
     fs.mkdirSync(path.dirname(dtsPath), { recursive: true });
